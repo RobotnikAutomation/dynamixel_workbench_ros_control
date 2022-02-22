@@ -61,25 +61,50 @@ bool DynamixelHardware::getDynamixelsInfo(const std::string yaml_file)
   for (YAML::const_iterator it_file = dynamixel.begin(); it_file != dynamixel.end(); it_file++)
   {
     std::string name = it_file->first.as<std::string>();
+
     if (name.size() == 0)
     {
       continue;
     }
 
     YAML::Node item = dynamixel[name];
+    DynamixelYamlConfig dynamixel_yaml_config;
     for (YAML::const_iterator it_item = item.begin(); it_item != item.end(); it_item++)
     {
       std::string item_name = it_item->first.as<std::string>();
-      int32_t value = it_item->second.as<int32_t>();
 
       if (item_name == "ID")
+      {
+        int32_t value = it_item->second.as<int32_t>();
+
         dynamixel_[name] = value;
+        dynamixel_yaml_config.id = value;
 
-      ItemValue item_value = { item_name, value };
-      std::pair<std::string, ItemValue> info(name, item_value);
+        ItemValue item_value = { item_name, value };
+        std::pair<std::string, ItemValue> info(name, item_value);
 
-      dynamixel_info_.push_back(info);
+        dynamixel_info_.push_back(info);
+      }
+      else if (item_name == "control_mode")
+      {
+        dynamixel_yaml_config.control_mode = it_item->second.as<std::string>();
+      }
+      else if (item_name == "spin")
+      {
+        dynamixel_yaml_config.spin = it_item->second.as<double>();
+        if (dynamixel_yaml_config.spin > 0)
+          dynamixel_yaml_config.spin = 1.0;
+        else
+          dynamixel_yaml_config.spin = -1.0;
+      }
     }
+    // ROS_INFO_STREAM("getDynamixelsInfo: joint " << name << ". ID = " << dynamixel_yaml_config.id
+    //                                            << ", control_mode = " << dynamixel_yaml_config.control_mode);
+
+    Joint joint;
+    joint.dynamixel_config = dynamixel_yaml_config;
+    joint.name = name;
+    joints_.push_back(joint);
   }
 
   return true;
@@ -112,35 +137,39 @@ bool DynamixelHardware::loadDynamixels(void)
 bool DynamixelHardware::initDynamixels(void)
 {
   const char* log;
+  bool result = false;
 
-  for (auto const& dxl : dynamixel_)
+  for (auto iter = joints_.begin(); iter != joints_.end(); iter++)
   {
-    dxl_wb_->torqueOff((uint8_t)dxl.second);
+    dxl_wb_->torqueOff((uint8_t)iter->dynamixel_config.id);
 
-    for (auto const& info : dynamixel_info_)
+    if (iter->dynamixel_config.control_mode == "position")
     {
-      if (dxl.first == info.first)
+      result = dxl_wb_->setPositionControlMode((uint8_t)iter->dynamixel_config.id, &log);
+      if (result == false)
       {
-        if (info.second.item_name != "ID" && info.second.item_name != "Baud_Rate")
-        {
-          bool result = dxl_wb_->itemWrite((uint8_t)dxl.second, info.second.item_name.c_str(), info.second.value, &log);
-          if (result == false)
-          {
-            ROS_ERROR("%s", log);
-            ROS_ERROR("Failed to write value[%d] on items[%s] to Dynamixel[Name : %s, ID : %d]", info.second.value,
-                      info.second.item_name.c_str(), dxl.first.c_str(), dxl.second);
-            return false;
-          }
-        }
+        ROS_ERROR("Error setting position control mode in servo %d: %s", iter->dynamixel_config.id, log);
+      }
+      else
+      {
+        ROS_INFO_STREAM("Setting position control mode for servo " << iter->dynamixel_config.id);
+      }
+    }
+    else if (iter->dynamixel_config.control_mode == "velocity")
+    {
+      result = dxl_wb_->setVelocityControlMode((uint8_t)iter->dynamixel_config.id, &log);
+      if (result == false)
+      {
+        ROS_ERROR("Error setting velocity control mode in servo %d: %s", iter->dynamixel_config.id, log);
+      }
+      else
+      {
+        ROS_INFO_STREAM("Setting velocity control mode for servo " << iter->dynamixel_config.id);
       }
     }
 
-    // dxl_wb_->torqueOn((uint8_t)dxl.second); // set torqueOn from yaml file?
+    dxl_wb_->torqueOn((uint8_t)iter->dynamixel_config.id);
   }
-
-  // Torque On after setting up all servo
-  for (auto const& dxl : dynamixel_)
-    dxl_wb_->torqueOn((uint8_t)dxl.second);
 
   return true;
 }
@@ -366,57 +395,52 @@ void DynamixelHardware::initializeDynamixelHardware()
 
 void DynamixelHardware::registerControlInterfaces()
 {
-  // ascending order
-  // std::vector<std::pair<uint32_t, std::string>> dynamixel(dynamixel_.size());
-  // int count = 0;
-  // for (auto iter = dynamixel.begin(); iter != dynamixel.end(); iter++)
-  //   {
-  //     for (auto iter = dynamixel_.begin(); iter != dynamixel_.end(); iter++)
-  //       {
-  //         if (count + 1 == iter->second)
-  //           {
-  //             std::pair<uint32_t, std::string> pair(iter->second, iter->first);
-  //             dynamixel[count] = pair; // range : 0, 1, 2, 3, 4
-  //             // ROS_INFO("joint_name : %s, servo ID: %d", iter->second.c_str(), iter->first);
-  //             break;
-  //           }
-  //       }
-  //     count++;
-  //   }
+  position_joints_size_ = velocity_joints_size_ = effort_joints_size_ = 0;
 
-  // resige vector
-  // joints_.resize(dynamixel.size());
-  joints_.resize(dynamixel_.size());
-
-  for (auto iter = dynamixel_.begin(); iter != dynamixel_.end(); iter++)
+  for (auto iter = joints_.begin(); iter != joints_.end(); iter++)
   {
-    // initialize joint vector
-    Joint joint;
-    joints_[iter->second - 1] = joint;
-    ROS_INFO("joint_name : %s, servo ID: %d", iter->first.c_str(), iter->second);
+    ROS_INFO("joint_name : %s, servo ID: %d, control_mode = %s, spin = %.0f", iter->name.c_str(),
+             iter->dynamixel_config.id, iter->dynamixel_config.control_mode.c_str(), iter->dynamixel_config.spin);
 
-    hardware_interface::JointStateHandle joint_state_handle(iter->first.c_str(), &joints_[iter->second - 1].position,
-                                                            &joints_[iter->second - 1].velocity,
-                                                            &joints_[iter->second - 1].effort);
+    hardware_interface::JointStateHandle joint_state_handle(iter->name.c_str(), &iter->position, &iter->velocity,
+                                                            &iter->effort);
     joint_state_interface_.registerHandle(joint_state_handle);
 
-    hardware_interface::JointHandle position_joint_handle(joint_state_handle,
-                                                          &joints_[iter->second - 1].position_command);
-    position_joint_interface_.registerHandle(position_joint_handle);
-    hardware_interface::JointHandle velocity_joint_handle(joint_state_handle,
-                                                          &joints_[iter->second - 1].velocity_command);
-    velocity_joint_interface_.registerHandle(velocity_joint_handle);
-    hardware_interface::JointHandle effort_joint_handle(joint_state_handle, &joints_[iter->second - 1].effort_command);
-    effort_joint_interface_.registerHandle(effort_joint_handle);
+    if (iter->dynamixel_config.control_mode == "position")
+    {
+      hardware_interface::JointHandle position_joint_handle(joint_state_handle, &iter->command);
+      position_joint_interface_.registerHandle(position_joint_handle);
+      position_joints_size_++;
+    }
+    else if (iter->dynamixel_config.control_mode == "velocity")
+    {
+      hardware_interface::JointHandle velocity_joint_handle(joint_state_handle, &iter->command);
+      velocity_joint_interface_.registerHandle(velocity_joint_handle);
+      velocity_joints_size_++;
+    }
+    /*
+    // NOT AVAILABLE FOR NOW
+    else if (iter->dynamixel_config.control_mode == "effort")
+    {
+      hardware_interface::JointHandle effort_joint_handle(joint_state_handle, &iter->command);
+      effort_joint_interface_.registerHandle(effort_joint_handle);
+      effort_joints_size_++;
+    }*/
+    else
+    {
+      ROS_ERROR_STREAM("Unknown control control_mode " << iter->dynamixel_config.control_mode << " for servo "
+                                                       << iter->dynamixel_config.id);
+      exit(-1);
+    }
   }
 
   registerInterface(&joint_state_interface_);
   registerInterface(&position_joint_interface_);
   registerInterface(&velocity_joint_interface_);
-  registerInterface(&effort_joint_interface_);
+  // registerInterface(&effort_joint_interface_);
 }
 
-void DynamixelHardware::read()
+void DynamixelHardware::read(const ros::Time& /*time*/, const ros::Duration& /*period*/)
 {
   bool result = false;
   const char* log = NULL;
@@ -437,7 +461,8 @@ void DynamixelHardware::read()
         dxl_wb_->syncRead(SYNC_READ_HANDLER_FOR_PRESENT_POSITION_VELOCITY_CURRENT, id_array, dynamixel_.size(), &log);
     if (result == false)
     {
-      ROS_ERROR("%s", log);
+      ROS_ERROR("read:syncRead: %s", log);
+      return;
     }
 
     result = dxl_wb_->getSyncReadData(SYNC_READ_HANDLER_FOR_PRESENT_POSITION_VELOCITY_CURRENT, id_array, id_cnt,
@@ -445,7 +470,8 @@ void DynamixelHardware::read()
                                       control_items_["Present_Current"]->data_length, get_current, &log);
     if (result == false)
     {
-      ROS_ERROR("%s", log);
+      ROS_ERROR("read:getSyncReadData:Current: %s", log);
+      return;
     }
 
     result = dxl_wb_->getSyncReadData(SYNC_READ_HANDLER_FOR_PRESENT_POSITION_VELOCITY_CURRENT, id_array, id_cnt,
@@ -453,7 +479,8 @@ void DynamixelHardware::read()
                                       control_items_["Present_Velocity"]->data_length, get_velocity, &log);
     if (result == false)
     {
-      ROS_ERROR("%s", log);
+      ROS_ERROR("read:getSyncReadData:Velocity: %s", log);
+      return;
     }
 
     result = dxl_wb_->getSyncReadData(SYNC_READ_HANDLER_FOR_PRESENT_POSITION_VELOCITY_CURRENT, id_array, id_cnt,
@@ -461,7 +488,8 @@ void DynamixelHardware::read()
                                       control_items_["Present_Position"]->data_length, get_position, &log);
     if (result == false)
     {
-      ROS_ERROR("%s", log);
+      ROS_ERROR("read:getSyncReadData:Position: %s", log);
+      return;
     }
 
     for (uint8_t index = 0; index < id_cnt; index++)
@@ -469,19 +497,20 @@ void DynamixelHardware::read()
       // index 0, 1, 2, 3, 4
       // joints_ 1, 2, 3, 4, 5
       // id_array 1, 5, 4, 2, 3
+      double spin = joints_[id_array[index] - 1].dynamixel_config.spin;
       joints_[id_array[index] - 1].position =
-          dxl_wb_->convertValue2Radian((uint8_t)id_array[index], (int32_t)get_position[index]);
+          dxl_wb_->convertValue2Radian((uint8_t)id_array[index], (int32_t)get_position[index]) * spin;
       joints_[id_array[index] - 1].velocity =
-          dxl_wb_->convertValue2Velocity((uint8_t)id_array[index], (int32_t)get_velocity[index]);
+          dxl_wb_->convertValue2Velocity((uint8_t)id_array[index], (int32_t)get_velocity[index]) * spin;
       // joints_[index].current = get_current[index];
 
       if (strcmp(dxl_wb_->getModelName((uint8_t)id_array[index]), "XL-320") == 0)
-        joints_[id_array[index] - 1].effort = dxl_wb_->convertValue2Load((int16_t)get_current[index]);
+        joints_[id_array[index] - 1].effort = dxl_wb_->convertValue2Load((int16_t)get_current[index]) * spin;
       else
-        joints_[id_array[index] - 1].effort = dxl_wb_->convertValue2Current((int16_t)get_current[index]);
+        joints_[id_array[index] - 1].effort = dxl_wb_->convertValue2Current((int16_t)get_current[index]) * spin;
 
-      if (is_first_ == true)
-        joints_[id_array[index] - 1].position_command = joints_[id_array[index] - 1].position;
+      // if (is_first_ == true)
+      //  joints_[id_array[index] - 1].command = joints_[id_array[index] - 1].position;
     }
   }
   else if (dxl_wb_->getProtocolVersion() == 1.0f)
@@ -499,57 +528,80 @@ void DynamixelHardware::read()
       {
         ROS_ERROR("%s", log);
       }
-
+      double spin = joints_[(uint8_t)dxl.second - 1].dynamixel_config.spin;
       // ID required to get model name
       joints_[(uint8_t)dxl.second - 1].position =
-          dxl_wb_->convertValue2Radian((uint8_t)dxl.second, (int32_t)DXL_MAKEWORD(get_all_data[0], get_all_data[1]));
+          dxl_wb_->convertValue2Radian((uint8_t)dxl.second, (int32_t)DXL_MAKEWORD(get_all_data[0], get_all_data[1])) *
+          spin;
       joints_[(uint8_t)dxl.second - 1].velocity =
-          dxl_wb_->convertValue2Velocity((uint8_t)dxl.second, (int32_t)DXL_MAKEWORD(get_all_data[2], get_all_data[3]));
+          dxl_wb_->convertValue2Velocity((uint8_t)dxl.second, (int32_t)DXL_MAKEWORD(get_all_data[2], get_all_data[3])) *
+          spin;
       joints_[(uint8_t)dxl.second - 1].effort =
-          dxl_wb_->convertValue2Load(DXL_MAKEWORD(get_all_data[4], get_all_data[5]));
+          dxl_wb_->convertValue2Load(DXL_MAKEWORD(get_all_data[4], get_all_data[5])) * spin;
 
       dxl_cnt++;
     }
   }
 }
 
-void DynamixelHardware::write()
+void DynamixelHardware::write(const ros::Time& /*time*/, const ros::Duration& /*period*/)
 {
   bool result = false;
   const char* log = NULL;
 
-  uint8_t id_array[dynamixel_.size()];
-  uint8_t id_cnt = 0;
+  uint8_t dynamixel_id_position_array[position_joints_size_];
+  int32_t dynamixel_position_value_array[position_joints_size_];
+  int32_t dynamixel_id_position_counter = 0;
+  uint8_t dynamixel_id_velocity_array[position_joints_size_];
+  int32_t dynamixel_velocity_value_array[position_joints_size_];
+  int32_t dynamixel_id_velocity_counter = 0;
 
-  int32_t dynamixel_position[dynamixel_.size()];
-
-  for (auto const& dxl : dynamixel_)
+  /*for (auto const& dxl : dynamixel_)
     id_array[id_cnt++] = (uint8_t)dxl.second;
 
   for (uint8_t index = 0; index < id_cnt; index++)
-    dynamixel_position[index] =
-        dxl_wb_->convertRadian2Value(id_array[index], joints_[id_array[index] - 1].position_command);
-
-  // if (is_first_ == true)
-  //   {
-  //     ROS_INFO("First write.");
-  //     for (uint8_t index = 0; index < id_cnt; index++)
-  //       dynamixel_position[index] = dxl_wb_->convertRadian2Value(id_array[index],
-  //       joints_[id_array[index]-1].position);
-
-  //     is_first_ = false;
-  //   }
-  // else
-  //   {
-  //     for (uint8_t index = 0; index < id_cnt; index++)
-  //       dynamixel_position[index] = dxl_wb_->convertRadian2Value(id_array[index],
-  //       joints_[id_array[index]-1].position_command);
-  //   }
-
-  result = dxl_wb_->syncWrite(SYNC_WRITE_HANDLER_FOR_GOAL_POSITION, id_array, id_cnt, dynamixel_position, 1, &log);
-  if (result == false)
+    dynamixel_position[index] = dxl_wb_->convertRadian2Value(id_array[index], joints_[id_array[index] - 1].command);
+    */
+  // split different servos by control
+  for (auto iter = joints_.begin(); iter != joints_.end(); iter++)
   {
-    ROS_ERROR("%s", log);
+    double spin = iter->dynamixel_config.spin;
+
+    if (iter->dynamixel_config.control_mode == "position")
+    {
+      dynamixel_id_position_array[dynamixel_id_position_counter] = (uint8_t)iter->dynamixel_config.id;
+      dynamixel_position_value_array[dynamixel_id_position_counter] =
+          dxl_wb_->convertRadian2Value((uint8_t)iter->dynamixel_config.id, iter->command * spin);
+      dynamixel_id_position_counter++;
+    }
+    else if (iter->dynamixel_config.control_mode == "velocity")
+    {
+      dynamixel_id_velocity_array[dynamixel_id_velocity_counter] = (uint8_t)iter->dynamixel_config.id;
+      dynamixel_velocity_value_array[dynamixel_id_velocity_counter] =
+          dxl_wb_->convertVelocity2Value((uint8_t)iter->dynamixel_config.id, iter->command * spin);
+      dynamixel_id_velocity_counter++;
+      // ROS_INFO_STREAM("ID " << iter->dynamixel_config.id << ", command = " << iter->command);
+    }
+  }
+  // Sync position servos
+  if (position_joints_size_ > 0)
+  {
+    result = dxl_wb_->syncWrite(SYNC_WRITE_HANDLER_FOR_GOAL_POSITION, dynamixel_id_position_array,
+                                dynamixel_id_position_counter, dynamixel_position_value_array, 1, &log);
+    if (result == false)
+    {
+      ROS_ERROR("Error writing command for position servos: %s", log);
+    }
+  }
+  // Sync velocity servos
+  if (velocity_joints_size_ > 0)
+  {
+    result = dxl_wb_->syncWrite(SYNC_WRITE_HANDLER_FOR_GOAL_VELOCITY, dynamixel_id_velocity_array,
+                                dynamixel_id_velocity_counter, dynamixel_velocity_value_array, 1, &log);
+    if (result == false)
+    {
+      ROS_ERROR("Error writing command for position servos: %s", log);
+    }
   }
 }
 

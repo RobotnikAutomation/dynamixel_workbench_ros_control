@@ -39,6 +39,7 @@
 // SYNC_READ_HANDLER(Only for Protocol 2.0)
 #define SYNC_READ_HANDLER_FOR_PRESENT_POSITION_VELOCITY_CURRENT 0
 
+
 namespace dynamixel_workbench_ros_control
 {
 
@@ -58,22 +59,30 @@ private:
     double acceleration;
   };
 
+  struct DynamixelYamlConfig{
+    int id;     // dynamixel ID in the bus
+    std::string control_mode; // control mode: velocity, position
+    double spin;      // direction of movement: 1 or -1
+  };
+
+
   struct Joint
   {
     double position;
-    // double position_offset; // only necessary for position
     double velocity;
     double current;
     double effort;
-    double position_command;
-    double velocity_command;
-    double effort_command;
+    double command;
+
+    std::string name;
+    DynamixelYamlConfig dynamixel_config;
 
     Joint() :
-      position(0.0), velocity(0.0), current(0.0), effort(0.0), position_command(0.0), velocity_command(0.0), effort_command(0.0)
+      position(0.0), velocity(0.0), current(0.0), effort(0.0), command(0.0)
     { }
   };
   std::vector<Joint> joints_;
+  int position_joints_size_, velocity_joints_size_, effort_joints_size_;
 
   // Parameters
   // bool is_moving_;
@@ -114,8 +123,8 @@ public:
   bool initSDKHandlers(void);
   bool getPresentPosition(std::vector<std::string> dxl_name);
 
-  void read();
-  void write();
+  void read(const ros::Time& /*time*/, const ros::Duration& /*period*/);
+  void write(const ros::Time& /*time*/, const ros::Duration& /*period*/);
 
 };
 
